@@ -1,0 +1,317 @@
+// Prisma Schema for LogComp
+// Logistics Management System
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== ENUMS ====================
+
+enum UserRole {
+  ADMIN           // Основная компания / Администратор
+  CUSTOMER        // Заказчик (Грузоотправитель)
+  WAREHOUSE       // Завсклад
+  DRIVER          // Водитель
+  RECIPIENT       // Грузополучатель
+  PARTNER         // Иная ТК (субподрядчик)
+}
+
+enum OrderStatus {
+  DRAFT           // Черновик
+  PENDING         // Ожидает назначения
+  ASSIGNED        // Назначен водитель
+  EN_ROUTE_PICKUP // Водитель едет на погрузку
+  AT_PICKUP       // Водитель на месте погрузки
+  LOADING         // Идет погрузка
+  IN_TRANSIT      // В пути
+  AT_DELIVERY     // Прибыл на выгрузку
+  UNLOADING       // Идет разгрузка
+  COMPLETED       // Завершен
+  CANCELLED       // Отменен
+  PROBLEM         // Проблема
+}
+
+enum DocumentType {
+  TTN             // Товарно-транспортная накладная
+  POWER_OF_ATTORNEY // Доверенность
+  ACT             // Акт
+  INVOICE         // Счет
+  OTHER           // Прочее
+}
+
+// ==================== MODELS ====================
+
+model User {
+  id            String    @id @default(cuid())
+  email         String?   @unique
+  phone         String    @unique
+  passwordHash  String?   // null для водителей (SMS auth)
+  firstName     String
+  lastName      String
+  middleName    String?
+  role          UserRole
+  isActive      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  sessions      Session[]
+  ordersAsCustomer   Order[]    @relation("CustomerOrders")
+  ordersAsDriver     Order[]    @relation("DriverOrders")
+  ordersAsRecipient  Order[]    @relation("RecipientOrders")
+  gpsPoints     GpsPoint[]
+  documents     Document[]
+  
+  // Компания (для PARTNER и WAREHOUSE)
+  companyId     String?
+  company       Company?   @relation(fields: [companyId], references: [id])
+  
+  // Водитель: данные транспорта
+  vehiclePlate  String?   // Госномер
+  vehicleModel  String?   // Модель авто
+  
+  @@index([phone])
+  @@index([role])
+}
+
+model Company {
+  id          String    @id @default(cuid())
+  name        String
+  bin         String?   // БИН/ИИН
+  address     String?
+  phone       String?
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  
+  users       User[]
+  orders      Order[]   @relation("PartnerOrders")
+}
+
+model Session {
+  id          String    @id @default(cuid())
+  userId      String
+  deviceId    String    // Для Single Session Policy
+  token       String    @unique
+  expiresAt   DateTime
+  createdAt   DateTime  @default(now())
+  
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([userId])
+  @@index([deviceId])
+}
+
+model Location {
+  id          String    @id @default(cuid())
+  name        String    // Название точки
+  address     String
+  latitude    Float
+  longitude   Float
+  contactName String?
+  contactPhone String?
+  notes       String?
+  createdAt   DateTime  @default(now())
+  
+  // Кто создал
+  createdById String?
+  
+  // Relations
+  ordersAsPickup    Order[] @relation("PickupLocation")
+  ordersAsDelivery  OrderDeliveryPoint[]
+  warehouseGates    WarehouseGate[]
+  
+  @@index([latitude, longitude])
+}
+
+model Order {
+  id              String      @id @default(cuid())
+  orderNumber     String      @unique // Номер заявки
+  status          OrderStatus @default(DRAFT)
+  
+  // Груз
+  cargoDescription String
+  cargoWeight     Float?      // кг
+  cargoVolume     Float?      // м³
+  cargoType       String?
+  requirements    String?     // Особые требования
+  
+  // Точка погрузки
+  pickupLocationId String
+  pickupLocation  Location    @relation("PickupLocation", fields: [pickupLocationId], references: [id])
+  pickupDate      DateTime?
+  pickupNotes     String?
+  
+  // Участники
+  customerId      String
+  customer        User        @relation("CustomerOrders", fields: [customerId], references: [id])
+  
+  driverId        String?
+  driver          User?       @relation("DriverOrders", fields: [driverId], references: [id])
+  
+  recipientId     String?
+  recipient       User?       @relation("RecipientOrders", fields: [recipientId], references: [id])
+  
+  // Если субподрядчик
+  partnerId       String?
+  partner         Company?    @relation("PartnerOrders", fields: [partnerId], references: [id])
+  
+  // Финансы
+  price           Float?
+  currency        String      @default("KZT")
+  
+  // Timestamps
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  completedAt     DateTime?
+  
+  // Relations
+  deliveryPoints  OrderDeliveryPoint[]
+  documents       Document[]
+  statusHistory   OrderStatusHistory[]
+  gpsPoints       GpsPoint[]
+  problems        OrderProblem[]
+  warehouseQueue  WarehouseQueueItem?
+  
+  @@index([status])
+  @@index([customerId])
+  @@index([driverId])
+  @@index([createdAt])
+}
+
+model OrderDeliveryPoint {
+  id          String    @id @default(cuid())
+  orderId     String
+  order       Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  
+  locationId  String
+  location    Location  @relation(fields: [locationId], references: [id])
+  
+  sequence    Int       // Порядок выгрузки
+  deliveredAt DateTime?
+  notes       String?
+  
+  @@index([orderId])
+}
+
+model OrderStatusHistory {
+  id          String      @id @default(cuid())
+  orderId     String
+  order       Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  
+  status      OrderStatus
+  comment     String?
+  changedById String?
+  changedAt   DateTime    @default(now())
+  
+  @@index([orderId])
+}
+
+model OrderProblem {
+  id          String    @id @default(cuid())
+  orderId     String
+  order       Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  
+  description String
+  reportedById String
+  resolvedAt  DateTime?
+  resolution  String?
+  createdAt   DateTime  @default(now())
+  
+  @@index([orderId])
+}
+
+model Document {
+  id          String       @id @default(cuid())
+  type        DocumentType
+  fileName    String
+  fileUrl     String       // S3 URL
+  fileSize    Int
+  mimeType    String
+  
+  orderId     String?
+  order       Order?       @relation(fields: [orderId], references: [id])
+  
+  uploadedById String
+  uploadedBy  User         @relation(fields: [uploadedById], references: [id])
+  
+  isVerified  Boolean      @default(false)
+  verifiedAt  DateTime?
+  
+  createdAt   DateTime     @default(now())
+  
+  @@index([orderId])
+  @@index([type])
+}
+
+model GpsPoint {
+  id          String    @id @default(cuid())
+  driverId    String
+  driver      User      @relation(fields: [driverId], references: [id])
+  
+  orderId     String?
+  order       Order?    @relation(fields: [orderId], references: [id])
+  
+  latitude    Float
+  longitude   Float
+  accuracy    Float?
+  speed       Float?    // км/ч
+  heading     Float?    // направление
+  
+  recordedAt  DateTime
+  receivedAt  DateTime  @default(now())
+  
+  @@index([driverId, recordedAt])
+  @@index([orderId])
+}
+
+// ==================== WAREHOUSE ====================
+
+model WarehouseGate {
+  id          String    @id @default(cuid())
+  locationId  String
+  location    Location  @relation(fields: [locationId], references: [id])
+  
+  gateNumber  String    // Номер ворот/рампы
+  isAvailable Boolean   @default(true)
+  
+  queueItems  WarehouseQueueItem[]
+  
+  @@unique([locationId, gateNumber])
+}
+
+model WarehouseQueueItem {
+  id          String    @id @default(cuid())
+  orderId     String    @unique
+  order       Order     @relation(fields: [orderId], references: [id])
+  
+  gateId      String?
+  gate        WarehouseGate? @relation(fields: [gateId], references: [id])
+  
+  arrivedAt   DateTime  @default(now())
+  assignedAt  DateTime?
+  startedAt   DateTime?
+  completedAt DateTime?
+  
+  instructions String?   // "Заезжайте на ворота 3"
+  
+  @@index([gateId])
+}
+
+// ==================== SMS VERIFICATION ====================
+
+model SmsCode {
+  id          String    @id @default(cuid())
+  phone       String
+  code        String
+  expiresAt   DateTime
+  attempts    Int       @default(0)
+  verified    Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  
+  @@index([phone, code])
+}
